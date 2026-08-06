@@ -1,0 +1,6 @@
+{
+  "name": "Blink Clip Card",
+  "render_readme": true,
+  "filename": "blink-clip-card.js",
+  "homeassistant": "2023.6.0"
+}
