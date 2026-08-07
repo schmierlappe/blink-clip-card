@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.5";
+const CARD_VERSION = "1.0.6";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -357,7 +357,9 @@ class BlinkClipCard extends HTMLElement {
       <div class="stage">
         <video playsinline preload="metadata" ${this._config.muted ? "muted" : ""}></video>
         <div class="scrim"></div>
-        <button class="bigplay" aria-label="Play clip"><ha-icon icon="mdi:play"></ha-icon></button>
+        <button class="bigplay" aria-label="Play clip">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="6.5,5 6.5,19 17.5,12"/></svg>
+        </button>
         <div class="meta">
           <button class="name"${this._config.entity ? "" : " disabled"}>${esc(this._name())}</button>
           <span class="stamp">${esc(stamp)}${counter}</span>
@@ -643,23 +645,20 @@ class BlinkClipCard extends HTMLElement {
         transition: opacity .12s linear;
       }
       .bigplay {
-        position: absolute; top: 50%; left: 50%;
-        transform: translate(-50%, -50%);
-        width: 56px; height: 56px; padding: 0; margin: 0;
+        position: absolute; inset: 0; margin: auto;
+        width: 56px; height: 56px; padding: 0;
         border: 0; border-radius: 50%; cursor: pointer;
         background: rgba(0,0,0,.45);
         backdrop-filter: blur(2px);
-        color: #fff; --mdc-icon-size: 34px;
-        display: flex; align-items: center; justify-content: center;
-        line-height: 0;
+        color: #fff;
+        display: block; line-height: 0;
         transition: opacity .12s linear, background .15s ease;
       }
       .bigplay:hover { background: rgba(0,0,0,.62); }
       .bigplay:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 3px; }
-      .bigplay ha-icon {
-        display: block; width: 34px; height: 34px;
-        /* mdi:play is drawn right of centre in its own viewBox; pull it back */
-        margin-left: -2px;
+      .bigplay svg {
+        display: block; width: 34px; height: 34px; margin: 11px;
+        fill: currentColor;
       }
 
       .stage.playing .scrim,
