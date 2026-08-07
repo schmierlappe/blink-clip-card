@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.6";
+const CARD_VERSION = "1.0.7";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -358,7 +358,7 @@ class BlinkClipCard extends HTMLElement {
         <video playsinline preload="metadata" ${this._config.muted ? "muted" : ""}></video>
         <div class="scrim"></div>
         <button class="bigplay" aria-label="Play clip">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="6.5,5 6.5,19 17.5,12"/></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="8.33,5 8.33,19 19.33,12"/></svg>
         </button>
         <div class="meta">
           <button class="name"${this._config.entity ? "" : " disabled"}>${esc(this._name())}</button>
