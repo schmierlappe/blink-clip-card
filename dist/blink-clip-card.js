@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.2";
+const CARD_VERSION = "1.0.3";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -419,6 +419,10 @@ class BlinkClipCard extends HTMLElement {
     });
     stage.addEventListener("click", (ev) => {
       if (ev.target.closest(".nav, .name, .bigplay")) return;
+      if (this._swiped) {
+        this._swiped = false;
+        return;
+      }
       if (video.paused) video.play().catch(() => {});
       else video.pause();
     });
@@ -447,6 +451,60 @@ class BlinkClipCard extends HTMLElement {
       else video.requestFullscreen?.() || video.webkitEnterFullscreen?.();
     });
 
+    // Swipe between clips. Older clips sit to the left (matching the chevrons
+    // and the strip), so dragging right brings an older one in.
+    if (this._clips.length > 1) {
+      const SLOP = 10; // px before a drag counts as horizontal
+      const TRIGGER = 45; // px before it changes clip
+      let active = false;
+      let startX = 0;
+      let startY = 0;
+      let dx = 0;
+      let horizontal = false;
+
+      const follow = (px) => {
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        video.style.transition = "none";
+        video.style.transform = `translateX(${Math.max(-48, Math.min(48, px / 3))}px)`;
+      };
+      const release = () => {
+        video.style.transition = "";
+        video.style.transform = "";
+      };
+
+      stage.addEventListener("pointerdown", (ev) => {
+        if (ev.pointerType === "mouse" && ev.button !== 0) return;
+        active = true;
+        horizontal = false;
+        startX = ev.clientX;
+        startY = ev.clientY;
+        dx = 0;
+      });
+
+      stage.addEventListener("pointermove", (ev) => {
+        if (!active) return;
+        dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!horizontal && Math.abs(dx) > SLOP && Math.abs(dx) > Math.abs(dy)) horizontal = true;
+        if (horizontal) follow(dx);
+      });
+
+      const finish = () => {
+        if (!active) return;
+        active = false;
+        release();
+        if (!horizontal) return;
+        // Any real drag suppresses the tap-to-play toggle that follows it.
+        this._swiped = true;
+        setTimeout(() => (this._swiped = false), 300);
+        if (Math.abs(dx) > TRIGGER) this._select(dx > 0 ? this._index + 1 : this._index - 1);
+      };
+
+      stage.addEventListener("pointerup", finish);
+      stage.addEventListener("pointercancel", finish);
+      stage.addEventListener("pointerleave", finish);
+    }
+
     r.querySelectorAll(".seg").forEach((el) =>
       el.addEventListener("click", () => this._select(Number(el.dataset.i)))
     );
@@ -470,8 +528,13 @@ class BlinkClipCard extends HTMLElement {
         position: relative; width: 100%;
         aspect-ratio: var(--bcc-ratio, 16 / 9);
         background: #000;
+        touch-action: pan-y;
+        user-select: none; -webkit-user-select: none;
       }
-      video { width: 100%; height: 100%; object-fit: cover; display: block; background: #000; }
+      video {
+        width: 100%; height: 100%; object-fit: cover; display: block; background: #000;
+        transition: transform .18s ease;
+      }
 
       .scrim {
         position: absolute; inset: auto 0 0 0; height: 76px;
