@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.1";
+const CARD_VERSION = "1.0.2";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -314,6 +314,7 @@ class BlinkClipCard extends HTMLElement {
       <div class="stage">
         <video playsinline preload="metadata" ${this._config.muted ? "muted" : ""}></video>
         <div class="scrim"></div>
+        <button class="bigplay" aria-label="Play clip"><ha-icon icon="mdi:play"></ha-icon></button>
         <div class="meta">
           <button class="name"${this._config.entity ? "" : " disabled"}>${esc(this._name())}</button>
           <span class="stamp">${esc(stamp)}${counter}</span>
@@ -412,8 +413,12 @@ class BlinkClipCard extends HTMLElement {
       if (video.paused) video.play().catch(() => {});
       else video.pause();
     });
+    r.querySelector(".bigplay")?.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      video.play().catch(() => {});
+    });
     stage.addEventListener("click", (ev) => {
-      if (ev.target.closest(".nav, .name")) return;
+      if (ev.target.closest(".nav, .name, .bigplay")) return;
       if (video.paused) video.play().catch(() => {});
       else video.pause();
     });
@@ -480,7 +485,25 @@ class BlinkClipCard extends HTMLElement {
         pointer-events: none;
         transition: opacity .12s linear;
       }
-      .stage.playing .scrim, .stage.playing .meta { opacity: 0; }
+      .bigplay {
+        position: absolute; top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        width: 56px; height: 56px; padding: 0;
+        border: 0; border-radius: 50%; cursor: pointer;
+        background: rgba(0,0,0,.45);
+        backdrop-filter: blur(2px);
+        color: #fff; --mdc-icon-size: 34px;
+        display: grid; place-items: center;
+        transition: opacity .12s linear, background .15s ease;
+      }
+      .bigplay:hover { background: rgba(0,0,0,.62); }
+      .bigplay:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 3px; }
+      .bigplay ha-icon { margin-left: 3px; } /* optical centring of the triangle */
+
+      .stage.playing .scrim,
+      .stage.playing .meta,
+      .stage.playing .bigplay { opacity: 0; }
+      .stage.playing .bigplay { pointer-events: none; }
       .stage.playing .name { pointer-events: none; }
       .name {
         pointer-events: auto; background: none; border: 0; padding: 0;
