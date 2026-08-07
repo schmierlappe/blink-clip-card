@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.0.1";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -66,6 +66,13 @@ function relativeTime(date, locale) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function clock(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return "0:00";
+  const s = Math.floor(seconds % 60);
+  const m = Math.floor(seconds / 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function ratioToCss(value) {
@@ -227,6 +234,8 @@ class BlinkClipCard extends HTMLElement {
       const url = await this._resolve(clip);
       video.dataset.clip = clip.media_content_id;
       video.src = url;
+      this._scrubbing = false;
+      this.shadowRoot.querySelector(".stage")?.classList.remove("playing");
       if (this._config.autoplay) video.play().catch(() => {});
     } catch (err) {
       this._state = "error";
@@ -303,7 +312,7 @@ class BlinkClipCard extends HTMLElement {
 
     this._card.innerHTML = `
       <div class="stage">
-        <video controls playsinline preload="metadata" ${this._config.muted ? "muted" : ""}></video>
+        <video playsinline preload="metadata" ${this._config.muted ? "muted" : ""}></video>
         <div class="scrim"></div>
         <div class="meta">
           <button class="name"${this._config.entity ? "" : " disabled"}>${esc(this._name())}</button>
@@ -317,6 +326,16 @@ class BlinkClipCard extends HTMLElement {
                        aria-label="Newer clip"><ha-icon icon="mdi:chevron-right"></ha-icon></button>`
             : ""
         }
+      </div>
+      <div class="controls">
+        <button class="pp" aria-label="Play"><ha-icon icon="mdi:play"></ha-icon></button>
+        <span class="t cur">0:00</span>
+        <input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
+        <span class="t dur">0:00</span>
+        <button class="mute" aria-label="Mute">
+          <ha-icon icon="${this._config.muted ? "mdi:volume-off" : "mdi:volume-high"}"></ha-icon>
+        </button>
+        <button class="fs" aria-label="Fullscreen"><ha-icon icon="mdi:fullscreen"></ha-icon></button>
       </div>
       ${
         this._clips.length > 1
@@ -346,6 +365,83 @@ class BlinkClipCard extends HTMLElement {
     const r = this.shadowRoot;
     r.querySelector(".older")?.addEventListener("click", () => this._select(this._index + 1));
     r.querySelector(".newer")?.addEventListener("click", () => this._select(this._index - 1));
+
+    const video = r.querySelector("video");
+    const stage = r.querySelector(".stage");
+    const pp = r.querySelector(".pp");
+    const seek = r.querySelector(".seek");
+    const cur = r.querySelector(".cur");
+    const dur = r.querySelector(".dur");
+    const mute = r.querySelector(".mute");
+
+    const setIcon = (btn, icon) => btn?.querySelector("ha-icon")?.setAttribute("icon", icon);
+    const paint = () => {
+      const pct = video.duration ? (video.currentTime / video.duration) * 100 : 0;
+      seek.style.setProperty("--pct", `${pct}%`);
+    };
+
+    // The overlay is only there to make the name readable on a paused frame.
+    // Once playback starts it is in the way, so it goes immediately.
+    video.addEventListener("play", () => {
+      stage.classList.add("playing");
+      setIcon(pp, "mdi:pause");
+      pp.setAttribute("aria-label", "Pause");
+    });
+    const stopped = () => {
+      stage.classList.remove("playing");
+      setIcon(pp, "mdi:play");
+      pp.setAttribute("aria-label", "Play");
+    };
+    video.addEventListener("pause", stopped);
+    video.addEventListener("ended", stopped);
+
+    video.addEventListener("loadedmetadata", () => {
+      dur.textContent = clock(video.duration);
+      seek.value = 0;
+      cur.textContent = "0:00";
+      paint();
+    });
+    video.addEventListener("timeupdate", () => {
+      if (this._scrubbing || !video.duration) return;
+      seek.value = Math.round((video.currentTime / video.duration) * 1000);
+      cur.textContent = clock(video.currentTime);
+      paint();
+    });
+
+    pp.addEventListener("click", () => {
+      if (video.paused) video.play().catch(() => {});
+      else video.pause();
+    });
+    stage.addEventListener("click", (ev) => {
+      if (ev.target.closest(".nav, .name")) return;
+      if (video.paused) video.play().catch(() => {});
+      else video.pause();
+    });
+
+    seek.addEventListener("input", () => {
+      this._scrubbing = true;
+      const t = (seek.value / 1000) * (video.duration || 0);
+      cur.textContent = clock(t);
+      seek.style.setProperty("--pct", `${seek.value / 10}%`);
+    });
+    const commit = () => {
+      if (!this._scrubbing) return;
+      this._scrubbing = false;
+      if (video.duration) video.currentTime = (seek.value / 1000) * video.duration;
+    };
+    seek.addEventListener("change", commit);
+    seek.addEventListener("pointerup", commit);
+
+    mute.addEventListener("click", () => {
+      video.muted = !video.muted;
+      setIcon(mute, video.muted ? "mdi:volume-off" : "mdi:volume-high");
+      mute.setAttribute("aria-label", video.muted ? "Unmute" : "Mute");
+    });
+    r.querySelector(".fs")?.addEventListener("click", () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else video.requestFullscreen?.() || video.webkitEnterFullscreen?.();
+    });
+
     r.querySelectorAll(".seg").forEach((el) =>
       el.addEventListener("click", () => this._select(Number(el.dataset.i)))
     );
@@ -376,12 +472,16 @@ class BlinkClipCard extends HTMLElement {
         position: absolute; inset: auto 0 0 0; height: 76px;
         background: linear-gradient(transparent, rgba(0,0,0,.72));
         pointer-events: none;
+        transition: opacity .12s linear;
       }
       .meta {
-        position: absolute; left: 12px; right: 12px; bottom: 42px;
+        position: absolute; left: 12px; right: 12px; bottom: 12px;
         display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
         pointer-events: none;
+        transition: opacity .12s linear;
       }
+      .stage.playing .scrim, .stage.playing .meta { opacity: 0; }
+      .stage.playing .name { pointer-events: none; }
       .name {
         pointer-events: auto; background: none; border: 0; padding: 0;
         font: 500 15px/1.2 var(--ha-card-header-font-family, inherit);
@@ -406,6 +506,53 @@ class BlinkClipCard extends HTMLElement {
       .nav[disabled] { opacity: 0 !important; pointer-events: none; }
       .older { left: 8px; } .newer { right: 8px; }
       @media (hover: none) { .nav { opacity: .8; } }
+
+      /* transport, always visible, below the video so nothing covers the picture */
+      .controls {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 8px 6px 4px;
+        background: var(--ha-card-background, var(--card-background-color));
+        color: var(--primary-text-color);
+      }
+      .controls button {
+        flex: 0 0 auto; width: 34px; height: 34px;
+        border: 0; border-radius: 50%; background: none; cursor: pointer;
+        color: var(--primary-text-color);
+        display: grid; place-items: center; --mdc-icon-size: 22px;
+      }
+      .controls button:hover { background: var(--divider-color, rgba(127,127,127,.2)); }
+      .controls button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
+      .t {
+        flex: 0 0 auto; font-variant-numeric: tabular-nums;
+        font: 400 12px/1 var(--ha-card-header-font-family, inherit);
+        color: var(--secondary-text-color);
+      }
+      .seek {
+        flex: 1 1 auto; min-width: 40px; height: 20px; margin: 0;
+        -webkit-appearance: none; appearance: none; background: none; cursor: pointer;
+        --pct: 0%;
+      }
+      .seek::-webkit-slider-runnable-track {
+        height: 4px; border-radius: 2px;
+        background: linear-gradient(to right,
+          var(--primary-color) var(--pct), var(--divider-color, #d0d0d0) var(--pct));
+      }
+      .seek::-moz-range-track {
+        height: 4px; border-radius: 2px; background: var(--divider-color, #d0d0d0);
+      }
+      .seek::-moz-range-progress {
+        height: 4px; border-radius: 2px; background: var(--primary-color);
+      }
+      .seek::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none;
+        width: 12px; height: 12px; margin-top: -4px; border: 0; border-radius: 50%;
+        background: var(--primary-color);
+      }
+      .seek::-moz-range-thumb {
+        width: 12px; height: 12px; border: 0; border-radius: 50%;
+        background: var(--primary-color);
+      }
+      .seek:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 
       /* one segment per clip, newest on the right */
       .strip {
@@ -530,5 +677,5 @@ window.customCards.push({
   name: "Blink Clip Card",
   description: "Plays the newest clips saved from your Blink cameras.",
   preview: false,
-  documentationURL: "https://github.com/USERNAME/blink-clip-card",
+  documentationURL: "https://github.com/schmierlappe/blink-clip-card",
 });
