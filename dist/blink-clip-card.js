@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.3";
+const CARD_VERSION = "1.0.4";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -73,6 +73,10 @@ function clock(seconds) {
   const s = Math.floor(seconds % 60);
   const m = Math.floor(seconds / 60);
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function reducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function ratioToCss(value) {
@@ -247,9 +251,48 @@ class BlinkClipCard extends HTMLElement {
 
   _select(i) {
     if (i < 0 || i >= this._clips.length || i === this._index) return;
+    const adjacent = Math.abs(i - this._index) === 1;
+    if (adjacent && !reducedMotion()) {
+      this._slide(i > this._index ? 1 : -1, i);
+      return;
+    }
     this._index = i;
     this._render();
     this._show();
+  }
+
+  /**
+   * Carousel transition. The outgoing clip continues in the direction of
+   * travel and the incoming one arrives from the opposite edge, so the
+   * gesture resolves instead of snapping back.
+   */
+  _slide(dir, target) {
+    if (this._sliding) return;
+    this._sliding = true;
+
+    const video = this.shadowRoot.querySelector("video");
+    const stage = this.shadowRoot.querySelector(".stage");
+    if (!video) {
+      this._sliding = false;
+      this._index = target;
+      this._render();
+      this._show();
+      return;
+    }
+
+    video.pause();
+    stage?.classList.remove("playing");
+    video.style.transition = "";
+    video.style.transform = `translateX(${dir * 100}%)`;
+    video.style.opacity = "0";
+
+    setTimeout(() => {
+      this._enterFrom = -dir;
+      this._index = target;
+      this._sliding = false;
+      this._render();
+      this._show();
+    }, 260);
   }
 
   /* ---------------------------------------------------------- rendering -- */
@@ -454,55 +497,104 @@ class BlinkClipCard extends HTMLElement {
     // Swipe between clips. Older clips sit to the left (matching the chevrons
     // and the strip), so dragging right brings an older one in.
     if (this._clips.length > 1) {
-      const SLOP = 10; // px before a drag counts as horizontal
-      const TRIGGER = 45; // px before it changes clip
+      const SLOP = 8; // px before a drag counts as horizontal
       let active = false;
       let startX = 0;
       let startY = 0;
+      let startT = 0;
       let dx = 0;
       let horizontal = false;
+      let pid = null;
 
-      const follow = (px) => {
-        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-        video.style.transition = "none";
-        video.style.transform = `translateX(${Math.max(-48, Math.min(48, px / 3))}px)`;
-      };
-      const release = () => {
-        video.style.transition = "";
-        video.style.transform = "";
+      const canGo = (dir) => {
+        const t = this._index + dir;
+        return t >= 0 && t < this._clips.length;
       };
 
       stage.addEventListener("pointerdown", (ev) => {
+        if (this._sliding) return;
         if (ev.pointerType === "mouse" && ev.button !== 0) return;
         active = true;
         horizontal = false;
         startX = ev.clientX;
         startY = ev.clientY;
+        startT = performance.now();
         dx = 0;
+        pid = ev.pointerId;
       });
 
       stage.addEventListener("pointermove", (ev) => {
         if (!active) return;
         dx = ev.clientX - startX;
         const dy = ev.clientY - startY;
-        if (!horizontal && Math.abs(dx) > SLOP && Math.abs(dx) > Math.abs(dy)) horizontal = true;
-        if (horizontal) follow(dx);
+
+        if (!horizontal) {
+          if (Math.abs(dy) > SLOP && Math.abs(dy) > Math.abs(dx)) {
+            active = false; // vertical intent, hand it back to the page
+            return;
+          }
+          if (Math.abs(dx) <= SLOP) return;
+          horizontal = true;
+          try {
+            stage.setPointerCapture(pid);
+          } catch (e) {
+            /* capture is a nicety, not a requirement */
+          }
+        }
+
+        // Track the finger 1:1, with resistance when there is nothing to
+        // reveal in that direction.
+        const eff = canGo(dx > 0 ? 1 : -1) ? dx : dx * 0.28;
+        video.style.transition = "none";
+        video.style.transform = `translateX(${eff}px)`;
       });
 
       const finish = () => {
         if (!active) return;
         active = false;
-        release();
+        try {
+          if (pid !== null) stage.releasePointerCapture(pid);
+        } catch (e) {
+          /* already released */
+        }
         if (!horizontal) return;
+
         // Any real drag suppresses the tap-to-play toggle that follows it.
         this._swiped = true;
-        setTimeout(() => (this._swiped = false), 300);
-        if (Math.abs(dx) > TRIGGER) this._select(dx > 0 ? this._index + 1 : this._index - 1);
+        setTimeout(() => (this._swiped = false), 350);
+
+        const width = stage.clientWidth || 1;
+        const velocity = dx / Math.max(performance.now() - startT, 1); // px/ms
+        const dir = dx > 0 ? 1 : -1;
+        const committed = Math.abs(dx) > width * 0.22 || Math.abs(velocity) > 0.45;
+
+        if (committed && canGo(dir)) {
+          video.style.transition = "";
+          this._slide(dir, this._index + dir);
+        } else {
+          video.style.transition = "";
+          video.style.transform = "";
+        }
       };
 
       stage.addEventListener("pointerup", finish);
       stage.addEventListener("pointercancel", finish);
-      stage.addEventListener("pointerleave", finish);
+    }
+
+    // Arrival half of a carousel transition.
+    if (this._enterFrom) {
+      const from = this._enterFrom;
+      this._enterFrom = 0;
+      video.style.transition = "none";
+      video.style.transform = `translateX(${from * 100}%)`;
+      video.style.opacity = "0";
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          video.style.transition = "";
+          video.style.transform = "";
+          video.style.opacity = "";
+        })
+      );
     }
 
     r.querySelectorAll(".seg").forEach((el) =>
@@ -533,7 +625,9 @@ class BlinkClipCard extends HTMLElement {
       }
       video {
         width: 100%; height: 100%; object-fit: cover; display: block; background: #000;
-        transition: transform .18s ease;
+        transition: transform .3s cubic-bezier(.32, .72, 0, 1),
+                    opacity .3s cubic-bezier(.32, .72, 0, 1);
+        will-change: transform;
       }
 
       .scrim {
@@ -669,7 +763,8 @@ class BlinkClipCard extends HTMLElement {
       .msg .detail { font-size: 12px; opacity: .7; }
 
       @media (prefers-reduced-motion: reduce) {
-        .nav, .seg i { transition: none; }
+        .nav, .seg i, .bigplay, .scrim, .meta { transition: none; }
+        video { transition: none; }
       }
     `;
   }
