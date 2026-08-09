@@ -36,24 +36,32 @@ as a **JavaScript module**.
 The card only displays what's already on disk. This automation puts them there:
 
 ```yaml
-- alias: "Save Blink Clips"
-  mode: single
-  max_exceeded: silent
-  triggers:
-    - trigger: time_pattern
-      minutes: "/3"
-  actions:
-    - action: homeassistant.update_entity
-      target:
-        entity_id: camera.back_entrance
-    - delay: "00:00:10"
-    - action: blink.save_recent_clips
-      target:
-        entity_id:
-          - camera.back_entrance
-          - camera.driveway
-      data:
-        file_path: /media/blink
+alias: Save Blink Clips
+triggers:
+  - trigger: time_pattern
+    minutes: /3
+actions:
+  - action: homeassistant.update_entity
+    target:
+      entity_id:
+        - camera.entity_id
+        - camera.entity_id
+  - delay: '00:00:10'
+  - repeat:
+      for_each:
+        - entity: camera.entity_id
+          dir: folder_name
+        - entity: camera.entity_id
+          dir: folder_name
+      sequence:
+        - action: blink.save_recent_clips
+          target:
+            entity_id: '{{ repeat.item.entity }}'
+          data:
+            file_path: /media/blink/{{ repeat.item.dir }}
+        - delay: '00:00:05'
+mode: single
+max_exceeded: silent
 ```
 
 Files land as `YYYYMMDD_HHmmSS_CameraName.mp4`. The name isn't configurable, which is what the card relies on to sort clips and to tell cameras apart when they share a folder.
@@ -64,8 +72,8 @@ Files land as `YYYYMMDD_HHmmSS_CameraName.mp4`. The name isn't configurable, whi
 type: custom:blink-clip-card
 title: Hintereingang
 path: local/blink
-camera: Back_Entrance
-entity: camera.back_entrance
+camera: Name
+entity: camera.entitiy_id
 ```
 
 | Option | Type | Default | Description |
@@ -82,25 +90,6 @@ entity: camera.back_entrance
 | `utc_timestamps` | boolean | `true` | Blink records clip times in UTC. Turn off if the displayed times are shifted by your timezone offset. |
 
 A visual editor is included, so all of this is editable from the card picker.
-
-### Several cameras
-
-One card each, pointed at the same folder:
-
-```yaml
-type: grid
-columns: 2
-square: false
-cards:
-  - type: custom:blink-clip-card
-    path: local/blink
-    camera: Back_Entrance
-    title: Hintereingang
-  - type: custom:blink-clip-card
-    path: local/blink
-    camera: Driveway
-    title: Einfahrt
-```
 
 ## Troubleshooting
 
