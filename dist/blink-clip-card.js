@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.7";
+const CARD_VERSION = "1.0.8";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -84,6 +84,15 @@ function ratioToCss(value) {
   return m ? `${m[1]} / ${m[2]}` : "16 / 9";
 }
 
+// resolve_media hands out signed URLs that stop working after `expires`
+// seconds. Re-resolve a little before that so a dashboard that stays open
+// (wall tablets) keeps playing.
+const URL_EXPIRES = 3600;
+const URL_TTL_MS = (URL_EXPIRES - 600) * 1000;
+
+// Lower bound for refresh_interval, so a typo can't poll the media API every second.
+const MIN_REFRESH = 10;
+
 function toMediaId(path) {
   const clean = String(path || DEFAULTS.path).replace(/^\/+|\/+$/g, "");
   return `media-source://media_source/${clean}`;
@@ -105,6 +114,8 @@ class BlinkClipCard extends HTMLElement {
     this._detail = "";
     this._built = false;
     this._busy = false;
+    this._gen = 0; // bumped on every setConfig; results of older loads are dropped
+    this._reloadPending = false;
   }
 
   static getConfigElement() {
@@ -116,17 +127,26 @@ class BlinkClipCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (config.clips !== undefined && (config.clips < 1 || config.clips > 30)) {
-      throw new Error("clips must be between 1 and 30");
+    if (config.clips !== undefined) {
+      const n = Number(config.clips);
+      if (!Number.isInteger(n) || n < 1 || n > 30) {
+        throw new Error("clips must be a whole number between 1 and 30");
+      }
+    }
+    if (config.refresh_interval !== undefined && !isFinite(Number(config.refresh_interval))) {
+      throw new Error("refresh_interval must be a number of seconds");
     }
     this._config = { ...DEFAULTS, ...config };
+    this._gen++;
     this._clips = [];
     this._index = 0;
     this._urls.clear();
     this._state = "loading";
     if (this._built) this._render();
     if (this._hass) this._load(true);
-    this._startTimer();
+    // The editor creates preview cards that are never attached; only poll
+    // while on the page. connectedCallback starts the timer otherwise.
+    if (this.isConnected) this._startTimer();
   }
 
   set hass(hass) {
@@ -152,7 +172,10 @@ class BlinkClipCard extends HTMLElement {
   _startTimer() {
     this._stopTimer();
     const secs = Number(this._config?.refresh_interval ?? DEFAULTS.refresh_interval);
-    if (secs > 0) this._timer = setInterval(() => this._load(false), secs * 1000);
+    if (secs > 0) {
+      const ms = Math.max(secs, MIN_REFRESH) * 1000;
+      this._timer = setInterval(() => this._load(false), ms);
+    }
   }
 
   _stopTimer() {
@@ -163,8 +186,15 @@ class BlinkClipCard extends HTMLElement {
   /* ------------------------------------------------------------ loading -- */
 
   async _load(showSpinner) {
-    if (this._busy || !this._hass || !this._config) return;
+    if (!this._hass || !this._config) return;
+    if (this._busy) {
+      // A config change while a load is in flight must not be lost: run
+      // again once the current one is through.
+      if (showSpinner) this._reloadPending = true;
+      return;
+    }
     this._busy = true;
+    const gen = this._gen;
     if (showSpinner) {
       this._state = "loading";
       this._render();
@@ -175,6 +205,7 @@ class BlinkClipCard extends HTMLElement {
         type: "media_source/browse_media",
         media_content_id: toMediaId(this._config.path),
       });
+      if (gen !== this._gen) return; // config changed meanwhile; this result is stale
 
       let files = (res.children || []).filter(
         (c) => !c.can_expand && /\.(mp4|m4v|mov|webm)$/i.test(c.title)
@@ -197,6 +228,16 @@ class BlinkClipCard extends HTMLElement {
       const previousNewest = this._clips[0]?.media_content_id;
       const userIsBrowsing = this._index > 0;
 
+      if (!showSpinner && this._state === "ready") {
+        // Background refresh. Rebuilding the card replaces the <video>, which
+        // stops playback and loses position and mute state, so only redraw
+        // when the list really changed, and never in the middle of a clip.
+        const ids = (list) => list.map((c) => c.media_content_id).join("\n");
+        if (ids(next) === ids(this._clips)) return;
+        const video = this.shadowRoot.querySelector("video");
+        if (video && !video.paused && !video.ended) return; // picked up on the next refresh
+      }
+
       this._clips = next;
       if (!userIsBrowsing || newest !== previousNewest) this._index = 0;
 
@@ -209,23 +250,45 @@ class BlinkClipCard extends HTMLElement {
       this._render();
       if (next.length) this._show();
     } catch (err) {
+      if (gen !== this._gen) return;
+      if (!showSpinner && this._state === "ready" && this._clips.length) {
+        // One failed background check shouldn't replace clips that are on screen.
+        console.warn("blink-clip-card: refresh failed, keeping current clips", err);
+        return;
+      }
       this._state = "error";
       this._message = `Could not read ${this._config.path}`;
       this._detail = err?.message || String(err);
       this._render();
     } finally {
       this._busy = false;
+      if (this._reloadPending) {
+        this._reloadPending = false;
+        this._load(true);
+      }
     }
   }
 
+  /** A still-valid signed URL for the clip from the cache, or undefined. */
+  _cachedUrl(id) {
+    const hit = this._urls.get(id);
+    if (!hit) return undefined;
+    if (Date.now() - hit.at > URL_TTL_MS) {
+      this._urls.delete(id);
+      return undefined;
+    }
+    return hit.url;
+  }
+
   async _resolve(clip) {
-    if (this._urls.has(clip.media_content_id)) return this._urls.get(clip.media_content_id);
+    const cached = this._cachedUrl(clip.media_content_id);
+    if (cached) return cached;
     const res = await this._hass.callWS({
       type: "media_source/resolve_media",
       media_content_id: clip.media_content_id,
-      expires: 3600,
+      expires: URL_EXPIRES,
     });
-    this._urls.set(clip.media_content_id, res.url);
+    this._urls.set(clip.media_content_id, { url: res.url, at: Date.now() });
     return res.url;
   }
 
@@ -308,7 +371,10 @@ class BlinkClipCard extends HTMLElement {
     const video = this.shadowRoot.querySelector("video");
     if (!video || !this._config?.entity) return;
     const pic = this._hass.states[this._config.entity]?.attributes?.entity_picture;
-    if (pic && video.poster !== pic) video.poster = pic;
+    // Compare the attribute, not video.poster: the property is the resolved
+    // absolute URL and would never equal the relative entity_picture, so the
+    // poster was reset on every state change in Home Assistant.
+    if (pic && video.getAttribute("poster") !== pic) video.setAttribute("poster", pic);
   }
 
   _name() {
@@ -400,7 +466,7 @@ class BlinkClipCard extends HTMLElement {
     this._paintPoster();
 
     const video = this.shadowRoot.querySelector("video");
-    const cached = this._urls.get(clip.media_content_id);
+    const cached = this._cachedUrl(clip.media_content_id);
     if (video && cached) {
       video.dataset.clip = clip.media_content_id;
       video.src = cached;
@@ -440,6 +506,17 @@ class BlinkClipCard extends HTMLElement {
     };
     video.addEventListener("pause", stopped);
     video.addEventListener("ended", stopped);
+
+    // A signed URL can still expire (e.g. the device slept past the TTL).
+    // Drop it and resolve a fresh one, once per clip, so this can't loop.
+    video.addEventListener("error", () => {
+      const id = video.dataset.clip;
+      if (!id || video.dataset.retried === id) return;
+      video.dataset.retried = id;
+      this._urls.delete(id);
+      delete video.dataset.clip;
+      this._show();
+    });
 
     video.addEventListener("loadedmetadata", () => {
       dur.textContent = clock(video.duration);
