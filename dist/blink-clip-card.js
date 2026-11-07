@@ -9,7 +9,7 @@
  * https://github.com/schmierlappe/blink-clip-card
  */
 
-const CARD_VERSION = "1.0.8";
+const CARD_VERSION = "1.0.9";
 
 console.info(
   `%c BLINK-CLIP-CARD %c ${CARD_VERSION} `,
@@ -35,10 +35,12 @@ const DEFAULTS = {
  * a plain descending sort by name is already newest-first.
  * ---------------------------------------------------------------------- */
 
+const VIDEO_FILE = /\.(mp4|m4v|mov|webm)$/i;
+
 const CLIP_NAME = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})_(.+?)\.\w+$/;
 
 function parseClip(title, utc) {
-  const m = title.match(CLIP_NAME);
+  const m = CLIP_NAME.exec(title);
   if (!m) return { time: null, camera: null };
   const [, y, mo, d, h, mi, s, camera] = m.map((v) => v);
   const time = utc
@@ -69,7 +71,7 @@ function relativeTime(date, locale) {
 }
 
 function clock(seconds) {
-  if (!isFinite(seconds) || seconds < 0) return "0:00";
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const s = Math.floor(seconds % 60);
   const m = Math.floor(seconds / 60);
   return `${m}:${String(s).padStart(2, "0")}`;
@@ -80,7 +82,7 @@ function reducedMotion() {
 }
 
 function ratioToCss(value) {
-  const m = String(value || "16:9").match(/^(\d+(?:\.\d+)?)\s*[:x\/]\s*(\d+(?:\.\d+)?)$/);
+  const m = /^(\d+(?:\.\d+)?)\s*[:x/]\s*(\d+(?:\.\d+)?)$/.exec(String(value || "16:9"));
   return m ? `${m[1]} / ${m[2]}` : "16 / 9";
 }
 
@@ -93,8 +95,21 @@ const URL_TTL_MS = (URL_EXPIRES - 600) * 1000;
 // Lower bound for refresh_interval, so a typo can't poll the media API every second.
 const MIN_REFRESH = 10;
 
+/**
+ * The text without leading and trailing slashes. A loop rather than
+ * /^\/+|\/+$/: on a long run of slashes that does not end the string, that
+ * pattern is retried from every one of them (super-linear backtracking).
+ */
+function trimSlashes(text) {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text[start] === "/") start++;
+  while (end > start && text[end - 1] === "/") end--;
+  return text.slice(start, end);
+}
+
 function toMediaId(path) {
-  const clean = String(path || DEFAULTS.path).replace(/^\/+|\/+$/g, "");
+  const clean = trimSlashes(String(path || DEFAULTS.path));
   return `media-source://media_source/${clean}`;
 }
 
@@ -133,7 +148,7 @@ class BlinkClipCard extends HTMLElement {
         throw new Error("clips must be a whole number between 1 and 30");
       }
     }
-    if (config.refresh_interval !== undefined && !isFinite(Number(config.refresh_interval))) {
+    if (config.refresh_interval !== undefined && !Number.isFinite(Number(config.refresh_interval))) {
       throw new Error("refresh_interval must be a number of seconds");
     }
     this._config = { ...DEFAULTS, ...config };
@@ -143,7 +158,7 @@ class BlinkClipCard extends HTMLElement {
     this._urls.clear();
     this._state = "loading";
     if (this._built) this._render();
-    if (this._hass) this._load(true);
+    if (this._hass) void this._load(true);
     // The editor creates preview cards that are never attached; only poll
     // while on the page. connectedCallback starts the timer otherwise.
     if (this.isConnected) this._startTimer();
@@ -153,7 +168,7 @@ class BlinkClipCard extends HTMLElement {
     const first = !this._hass;
     this._hass = hass;
     if (!this._built) this._build();
-    if (first && this._config) this._load(true);
+    if (first && this._config) void this._load(true);
     else this._paintPoster();
   }
 
@@ -174,7 +189,7 @@ class BlinkClipCard extends HTMLElement {
     const secs = Number(this._config?.refresh_interval ?? DEFAULTS.refresh_interval);
     if (secs > 0) {
       const ms = Math.max(secs, MIN_REFRESH) * 1000;
-      this._timer = setInterval(() => this._load(false), ms);
+      this._timer = setInterval(() => void this._load(false), ms);
     }
   }
 
@@ -207,66 +222,78 @@ class BlinkClipCard extends HTMLElement {
       });
       if (gen !== this._gen) return; // config changed meanwhile; this result is stale
 
-      let files = (res.children || []).filter(
-        (c) => !c.can_expand && /\.(mp4|m4v|mov|webm)$/i.test(c.title)
-      );
-
-      const utc = this._config.utc_timestamps !== false;
-      files.forEach((f) => Object.assign(f, parseClip(f.title, utc)));
-
-      if (this._config.camera) {
-        const want = normalize(this._config.camera);
-        files = files.filter((f) =>
-          f.camera ? normalize(f.camera) === want : normalize(f.title).includes(want)
-        );
-      }
-
-      files.sort((a, b) => b.title.localeCompare(a.title));
-
-      const next = files.slice(0, Number(this._config.clips));
-      const newest = next[0]?.media_content_id;
-      const previousNewest = this._clips[0]?.media_content_id;
-      const userIsBrowsing = this._index > 0;
-
-      if (!showSpinner && this._state === "ready") {
-        // Background refresh. Rebuilding the card replaces the <video>, which
-        // stops playback and loses position and mute state, so only redraw
-        // when the list really changed, and never in the middle of a clip.
-        const ids = (list) => list.map((c) => c.media_content_id).join("\n");
-        if (ids(next) === ids(this._clips)) return;
-        const video = this.shadowRoot.querySelector("video");
-        if (video && !video.paused && !video.ended) return; // picked up on the next refresh
-      }
-
-      this._clips = next;
-      if (!userIsBrowsing || newest !== previousNewest) this._index = 0;
-
-      if (!next.length) {
-        this._state = "empty";
-        this._message = "No clips found";
-      } else {
-        this._state = "ready";
-      }
-      this._render();
-      if (next.length) this._show();
+      const next = this._pickClips(res.children || []);
+      if (!showSpinner && this._keepCurrent(next)) return;
+      this._applyClips(next);
     } catch (err) {
-      if (gen !== this._gen) return;
-      if (!showSpinner && this._state === "ready" && this._clips.length) {
-        // One failed background check shouldn't replace clips that are on screen.
-        console.warn("blink-clip-card: refresh failed, keeping current clips", err);
-        return;
-      }
-      this._state = "error";
-      this._message = `Could not read ${this._config.path}`;
-      this._detail = err?.message || String(err);
-      this._render();
+      if (gen === this._gen) this._loadFailed(err, showSpinner);
     } finally {
       this._busy = false;
       if (this._reloadPending) {
         this._reloadPending = false;
-        this._load(true);
+        void this._load(true);
       }
     }
+  }
+
+  /** The newest clips for this card from a media_source folder listing, newest first. */
+  _pickClips(children) {
+    const utc = this._config.utc_timestamps !== false;
+    let files = children.filter((c) => !c.can_expand && VIDEO_FILE.test(c.title));
+    files.forEach((f) => Object.assign(f, parseClip(f.title, utc)));
+
+    if (this._config.camera) {
+      const want = normalize(this._config.camera);
+      files = files.filter((f) =>
+        f.camera ? normalize(f.camera) === want : normalize(f.title).includes(want)
+      );
+    }
+
+    files.sort((a, b) => b.title.localeCompare(a.title));
+    return files.slice(0, Number(this._config.clips));
+  }
+
+  /**
+   * Whether a background refresh should leave the card as it is. Rebuilding
+   * the card replaces the <video>, which stops playback and loses position and
+   * mute state, so only redraw when the list really changed, and never in the
+   * middle of a clip (the next refresh picks the change up).
+   */
+  _keepCurrent(next) {
+    if (this._state !== "ready") return false;
+    const ids = (list) => list.map((c) => c.media_content_id).join("\n");
+    if (ids(next) === ids(this._clips)) return true;
+    const video = this.shadowRoot.querySelector("video");
+    return Boolean(video && !video.paused && !video.ended);
+  }
+
+  _applyClips(next) {
+    const newestChanged = next[0]?.media_content_id !== this._clips[0]?.media_content_id;
+    const userIsBrowsing = this._index > 0;
+
+    this._clips = next;
+    if (!userIsBrowsing || newestChanged) this._index = 0;
+
+    if (next.length) {
+      this._state = "ready";
+    } else {
+      this._state = "empty";
+      this._message = "No clips found";
+    }
+    this._render();
+    if (next.length) void this._show();
+  }
+
+  _loadFailed(err, showSpinner) {
+    if (!showSpinner && this._state === "ready" && this._clips.length) {
+      // One failed background check shouldn't replace clips that are on screen.
+      console.warn("blink-clip-card: refresh failed, keeping current clips", err);
+      return;
+    }
+    this._state = "error";
+    this._message = `Could not read ${this._config.path}`;
+    this._detail = err?.message || String(err);
+    this._render();
   }
 
   /** A still-valid signed URL for the clip from the cache, or undefined. */
@@ -321,7 +348,7 @@ class BlinkClipCard extends HTMLElement {
     }
     this._index = i;
     this._render();
-    this._show();
+    void this._show();
   }
 
   /**
@@ -339,7 +366,7 @@ class BlinkClipCard extends HTMLElement {
       this._sliding = false;
       this._index = target;
       this._render();
-      this._show();
+      void this._show();
       return;
     }
 
@@ -354,7 +381,7 @@ class BlinkClipCard extends HTMLElement {
       this._index = target;
       this._sliding = false;
       this._render();
-      this._show();
+      void this._show();
     }, 260);
   }
 
@@ -382,7 +409,7 @@ class BlinkClipCard extends HTMLElement {
     const ent = this._config.entity ? this._hass?.states[this._config.entity] : null;
     if (ent) return ent.attributes.friendly_name || this._config.entity;
     const clip = this._clips[this._index];
-    return (clip?.camera || this._config.camera || "Blink").replace(/_/g, " ");
+    return (clip?.camera || this._config.camera || "Blink").replaceAll("_", " ");
   }
 
   _render() {
@@ -398,12 +425,29 @@ class BlinkClipCard extends HTMLElement {
     }
 
     if (this._state === "error" || this._state === "empty") {
-      const icon = this._state === "error" ? "mdi:alert-circle-outline" : "mdi:video-off-outline";
-      const hint =
-        this._state === "error"
-          ? this._detail
-          : "Clips appear here once the save automation has run.";
-      this._card.innerHTML = `
+      this._card.innerHTML = this._messageMarkup();
+      return;
+    }
+
+    const clip = this._clips[this._index];
+    this._card.innerHTML = this._playerMarkup(clip);
+
+    this._wire();
+    this._paintPoster();
+
+    const video = this.shadowRoot.querySelector("video");
+    const cached = this._cachedUrl(clip.media_content_id);
+    if (video && cached) {
+      video.dataset.clip = clip.media_content_id;
+      video.src = cached;
+    }
+  }
+
+  _messageMarkup() {
+    const error = this._state === "error";
+    const icon = error ? "mdi:alert-circle-outline" : "mdi:video-off-outline";
+    const hint = error ? this._detail : "Clips appear here once the save automation has run.";
+    return `
         <div class="stage">
           <div class="msg">
             <ha-icon icon="${icon}"></ha-icon>
@@ -411,15 +455,38 @@ class BlinkClipCard extends HTMLElement {
             <p class="detail">${esc(hint)}</p>
           </div>
         </div>`;
-      return;
-    }
+  }
 
-    const clip = this._clips[this._index];
+  /** Chevrons for older/newer, or nothing when there is only one clip. */
+  _navMarkup() {
+    if (this._clips.length < 2) return "";
+    const olderOff = this._index >= this._clips.length - 1 ? "disabled" : "";
+    const newerOff = this._index <= 0 ? "disabled" : "";
+    return `<button class="nav older" ${olderOff}
+                       aria-label="Older clip"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+               <button class="nav newer" ${newerOff}
+                       aria-label="Newer clip"><ha-icon icon="mdi:chevron-right"></ha-icon></button>`;
+  }
+
+  /** One segment per clip below the controls, or nothing when there is only one clip. */
+  _stripMarkup(locale) {
+    if (this._clips.length < 2) return "";
+    const segs = this._clips.map((c, i) => {
+      const on = i === this._index;
+      const label = c.time ? c.time.toLocaleString(locale) : c.title;
+      return `<button class="seg${on ? " on" : ""}" data-i="${i}"
+                           aria-current="${on}"
+                           title="${esc(label)}"><i></i></button>`;
+    });
+    return `<div class="strip">${segs.join("")}</div>`;
+  }
+
+  _playerMarkup(clip) {
     const locale = this._hass?.locale?.language || navigator.language || "en";
     const stamp = clip.time ? relativeTime(clip.time, locale) : clip.title.replace(/\.\w+$/, "");
     const counter = this._clips.length > 1 ? ` · ${this._index + 1}/${this._clips.length}` : "";
 
-    this._card.innerHTML = `
+    return `
       <div class="stage">
         <video playsinline preload="metadata" ${this._config.muted ? "muted" : ""}></video>
         <div class="scrim"></div>
@@ -430,14 +497,7 @@ class BlinkClipCard extends HTMLElement {
           <button class="name"${this._config.entity ? "" : " disabled"}>${esc(this._name())}</button>
           <span class="stamp">${esc(stamp)}${counter}</span>
         </div>
-        ${
-          this._clips.length > 1
-            ? `<button class="nav older" ${this._index >= this._clips.length - 1 ? "disabled" : ""}
-                       aria-label="Older clip"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
-               <button class="nav newer" ${this._index <= 0 ? "disabled" : ""}
-                       aria-label="Newer clip"><ha-icon icon="mdi:chevron-right"></ha-icon></button>`
-            : ""
-        }
+        ${this._navMarkup()}
       </div>
       <div class="controls">
         <button class="pp" aria-label="Play"><ha-icon icon="mdi:play"></ha-icon></button>
@@ -449,28 +509,7 @@ class BlinkClipCard extends HTMLElement {
         </button>
         <button class="fs" aria-label="Fullscreen"><ha-icon icon="mdi:fullscreen"></ha-icon></button>
       </div>
-      ${
-        this._clips.length > 1
-          ? `<div class="strip">${this._clips
-              .map(
-                (c, i) =>
-                  `<button class="seg${i === this._index ? " on" : ""}" data-i="${i}"
-                           aria-current="${i === this._index}"
-                           title="${esc(c.time ? c.time.toLocaleString(locale) : c.title)}"><i></i></button>`
-              )
-              .join("")}</div>`
-          : ""
-      }`;
-
-    this._wire();
-    this._paintPoster();
-
-    const video = this.shadowRoot.querySelector("video");
-    const cached = this._cachedUrl(clip.media_content_id);
-    if (video && cached) {
-      video.dataset.clip = clip.media_content_id;
-      video.src = cached;
-    }
+      ${this._stripMarkup(locale)}`;
   }
 
   _wire() {
@@ -515,7 +554,7 @@ class BlinkClipCard extends HTMLElement {
       video.dataset.retried = id;
       this._urls.delete(id);
       delete video.dataset.clip;
-      this._show();
+      void this._show();
     });
 
     video.addEventListener("loadedmetadata", () => {
@@ -569,8 +608,14 @@ class BlinkClipCard extends HTMLElement {
       mute.setAttribute("aria-label", video.muted ? "Unmute" : "Mute");
     });
     r.querySelector(".fs")?.addEventListener("click", () => {
-      if (document.fullscreenElement) document.exitFullscreen();
-      else video.requestFullscreen?.() || video.webkitEnterFullscreen?.();
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else if (video.requestFullscreen) {
+        // iPhone Safari rejects element fullscreen for <video>; use its own player there.
+        video.requestFullscreen().catch(() => video.webkitEnterFullscreen?.());
+      } else {
+        video.webkitEnterFullscreen?.();
+      }
     });
 
     // Swipe between clips. Older clips sit to the left (matching the chevrons
@@ -623,7 +668,8 @@ class BlinkClipCard extends HTMLElement {
 
         // Track the finger 1:1, with resistance when there is nothing to
         // reveal in that direction.
-        const eff = canGo(dx > 0 ? 1 : -1) ? dx : dx * 0.28;
+        const towards = dx > 0 ? 1 : -1;
+        const eff = canGo(towards) ? dx : dx * 0.28;
         video.style.transition = "none";
         video.style.transform = `translateX(${eff}px)`;
       });
